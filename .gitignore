@@ -1,8 +1,12 @@
 node_modules/
 .next/
+.build-check/
+.next-verify/
 out/
 coverage/
 .env*
 !.env.example
 *.tsbuildinfo
 .vercel/
+.supabase_cli_state/
+supabase/.temp/
