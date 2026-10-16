@@ -23,7 +23,7 @@ export function MeterGrid({ rows, readDate, monthLabel }: { rows: MeterGridRow[]
 
   return <section className="card" style={{ marginBottom: 18 }}>
     <h2 className="section-title">จดมิเตอร์ประจำ {monthLabel}</h2>
-    <p className="subtitle">ระบบแสดงเลขล่าสุดก่อนเดือนนี้ คู่กับค่าที่จดในเดือนนี้ และคำนวณหน่วยกับยอดประมาณการทันที</p>
+    <p className="subtitle">น้ำ 12 บาท/หน่วย · ไฟ 8 บาท/หน่วย ระบบแสดงเลขครั้งก่อนและคำนวณยอดให้ทันที</p>
     <div className="table-wrap">
       <table className="meter-table"><thead><tr><th>ห้อง</th><th>มิเตอร์</th><th>เลขก่อนหน้า</th><th>เลขเดือนนี้</th><th>หน่วยที่ใช้</th><th>อัตรา/หน่วย</th><th>ยอดประมาณ</th><th>บันทึก</th></tr></thead>
         <tbody>{rows.map(row => {

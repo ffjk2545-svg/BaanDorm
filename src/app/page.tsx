@@ -9,22 +9,41 @@ export default async function Dashboard() {
   if (!supabase) return <main className="auth"><section className="auth-card"><div className="brand"><span className="brand-mark">⌂</span>KumkongApartment</div><h1>เชื่อมต่อฐานข้อมูล</h1><p className="subtitle">เพิ่มค่า Supabase ในไฟล์ .env.local แล้วเริ่มตั้งค่าระบบ</p><ol><li>สร้างโปรเจกต์ Supabase</li><li>รัน migration ใน <code>supabase/migrations</code></li><li>คัดลอกค่าจาก <code>.env.example</code> ไปยัง <code>.env.local</code></li></ol><Link className="button" href="/login">ไปหน้าเข้าสู่ระบบ</Link></section></main>;
   if (!user) redirect("/login");
   if (!organizationId) redirect("/setup");
-  const [rooms, tenants, invoices, paidPayments, income, expenses] = await Promise.all([
-    supabase.from("rooms").select("id,status", { count: "exact" }).eq("organization_id", organizationId),
-    supabase.from("leases").select("tenant_id", { count: "exact" }).eq("organization_id", organizationId).eq("status", "active"),
-    supabase.from("invoices").select("id,total,status,due_date").eq("organization_id", organizationId).neq("status", "void"),
+
+  const [rooms, invoices, payments, brand] = await Promise.all([
+    supabase.from("rooms").select("id,room_number,status,monthly_rent").eq("organization_id", organizationId).order("room_number"),
+    supabase.from("invoices").select("id,total,status").eq("organization_id", organizationId).in("status", ["issued", "partial", "overdue"]),
     supabase.from("payments").select("invoice_id,amount").eq("organization_id", organizationId),
-    supabase.from("payments").select("amount").eq("organization_id", organizationId).gte("received_at", new Date(new Date().getFullYear(),new Date().getMonth(),1).toISOString()),
-    supabase.from("expenses").select("amount").eq("organization_id", organizationId).gte("incurred_on", new Date().toISOString().slice(0,8)+"01"),
+    supabase.from("organizations").select("brand_logo_url").eq("id", organizationId).maybeSingle(),
   ]);
-  const totalRooms = rooms.count ?? 0;
-  const occupied = rooms.data?.filter(r => r.status === "occupied").length ?? 0;
-  const paymentsByInvoice = new Map<string,number>();
-  paidPayments.data?.forEach(p=>paymentsByInvoice.set(p.invoice_id,(paymentsByInvoice.get(p.invoice_id)??0)+Number(p.amount)));
-  const outstanding = invoices.data?.filter(i => ["issued","partial","overdue"].includes(i.status)).reduce((s,i) => s + Math.max(Number(i.total)-(paymentsByInvoice.get(i.id)??0),0),0) ?? 0;
-  const cashIn = income.data?.reduce((s,p)=>s+Number(p.amount),0) ?? 0;
-  const cashOut = expenses.data?.reduce((s,e)=>s+Number(e.amount),0) ?? 0;
-  const { data: brand } = await supabase.from("organizations").select("brand_logo_url").eq("id", organizationId).maybeSingle();
-  return <AppShell current="/" userEmail={user.email ?? ""} brandLogoUrl={brand?.brand_logo_url}><div className="page-heading"><div><h1>ภาพรวม</h1><p className="subtitle">สรุปผลการดำเนินงานจากข้อมูลจริงของกิจการ</p></div><Link className="button" href="/meters">เริ่มจดมิเตอร์</Link></div><section className="metric-grid"><Metric label="ห้องที่มีผู้เช่า" value={`${occupied} / ${totalRooms}`} note={totalRooms?`อัตราเข้าพัก ${Math.round(occupied/totalRooms*100)}%`:"เพิ่มห้องเพื่อเริ่มติดตาม"}/><Metric label="สัญญาที่กำลังใช้งาน" value={String(tenants.count ?? 0)} note="สัญญาเช่าที่ยังมีผล"/><Metric label="ยอดเรียกเก็บคงค้าง" value={formatTHB(outstanding)} note="ยอดบิลที่ยังไม่ชำระครบ"/><Metric label="เงินสดรับสุทธิเดือนนี้" value={formatTHB(cashIn-cashOut)} note={`รับ ${formatTHB(cashIn)} · จ่าย ${formatTHB(cashOut)}`}/></section><section className="card"><h2 className="section-title">งานที่ต้องทำ</h2>{totalRooms===0?<div className="empty"><strong>เริ่มต้นด้วยการเพิ่มห้องพัก</strong>เพิ่มห้องและกำหนดค่าเช่าเพื่อเตรียมข้อมูลสำหรับสัญญาและการวางบิล<p><Link className="button" href="/rooms">เพิ่มห้องแรก</Link></p></div>:<div className="table-wrap"><table><thead><tr><th>รายการ</th><th>จำนวน</th><th>ไปที่</th></tr></thead><tbody><tr><td>บิลที่ยังค้างชำระ</td><td>{invoices.data?.filter(i=>["issued","partial","overdue"].includes(i.status)).length ?? 0}</td><td><Link href="/invoices">ดูบิล</Link></td></tr><tr><td>ห้องว่าง</td><td>{rooms.data?.filter(r=>r.status==="available").length ?? 0}</td><td><Link href="/rooms">ดูห้องพัก</Link></td></tr></tbody></table></div>}</section></AppShell>;
+  const roomRows = rooms.data ?? [];
+  const occupied = roomRows.filter(room => room.status === "occupied").length;
+  const available = roomRows.filter(room => room.status === "available").length;
+  const paidByInvoice = new Map<string, number>();
+  payments.data?.forEach(payment => paidByInvoice.set(payment.invoice_id, (paidByInvoice.get(payment.invoice_id) ?? 0) + Number(payment.amount)));
+  const outstanding = invoices.data?.reduce((sum, invoice) => sum + Math.max(Number(invoice.total) - (paidByInvoice.get(invoice.id) ?? 0), 0), 0) ?? 0;
+
+  return <AppShell current="/" userEmail={user.email ?? ""} brandLogoUrl={brand.data?.brand_logo_url}>
+    <div className="page-heading"><div><h1>ภาพรวม</h1><p className="subtitle">ดูห้องว่าง ห้องที่มีผู้เช่า และบิลที่ยังต้องติดตาม</p></div><Link className="button" href="/rooms">จัดการห้องพัก</Link></div>
+    <section className="metric-grid">
+      <Metric label="ห้องทั้งหมด" value={String(roomRows.length)} note="จำนวนห้องในกิจการ"/>
+      <Metric label="มีผู้เช่า" value={String(occupied)} note="ห้องที่กำลังคิดค่าเช่า"/>
+      <Metric label="ห้องว่าง" value={String(available)} note="พร้อมเพิ่มผู้เช่า"/>
+      <Metric label="ยอดบิลที่ต้องติดตาม" value={formatTHB(outstanding)} note={`${invoices.data?.length ?? 0} บิลที่ยังไม่ชำระครบ`}/>
+    </section>
+    <section className="card" style={{marginBottom:18}}>
+      <h2 className="section-title">ทำรายการ</h2>
+      <div className="quick-actions">
+        <Link className="quick-action" href="/rooms"><strong>เพิ่มห้องหรือผู้เช่า</strong><span>ดูสถานะห้องทั้งหมดในหน้าเดียว</span></Link>
+        <Link className="quick-action" href="/meters"><strong>จดมิเตอร์น้ำและไฟ</strong><span>น้ำ 12 บาท/หน่วย · ไฟ 8 บาท/หน่วย</span></Link>
+        <Link className="quick-action" href="/invoices"><strong>คิดค่าเช่าประจำเดือน</strong><span>ออกบิลให้ห้องที่มีผู้เช่าด้วยปุ่มเดียว</span></Link>
+      </div>
+    </section>
+    <section className="card">
+      <h2 className="section-title">สถานะห้อง</h2>
+      {roomRows.length === 0 ? <div className="empty"><strong>ยังไม่มีห้องพัก</strong>เพิ่มห้องแรกเพื่อเริ่มจัดการหอพัก<p><Link className="button" href="/rooms">เพิ่มห้องพัก</Link></p></div> : <div className="room-grid">{roomRows.map(room => <article className="room-card" key={room.id}><div className="room-card-heading"><strong>ห้อง {room.room_number}</strong><span className={`badge ${room.status === "occupied" ? "good" : room.status === "maintenance" ? "warn" : ""}`}>{room.status === "occupied" ? "มีผู้เช่า" : room.status === "maintenance" ? "ปิดซ่อม" : room.status === "reserved" ? "จองแล้ว" : "ว่าง"}</span></div><p>ค่าเช่า {formatTHB(Number(room.monthly_rent))}/เดือน</p></article>)}</div>}
+    </section>
+  </AppShell>;
 }
+
 function Metric({label,value,note}:{label:string;value:string;note:string}) { return <div className="card"><div className="metric-label">{label}</div><div className="metric-value">{value}</div><div className="metric-note">{note}</div></div>; }

@@ -1,15 +1,13 @@
 import Link from "next/link";
-import { Building2, CalendarDays, ClipboardList, CreditCard, FileText, Gauge, Home, Megaphone, Package, Settings, SlidersHorizontal, Users, Wrench, Wallet } from "lucide-react";
+import { Building2, ClipboardList, Gauge, Home, Settings } from "lucide-react";
 import { signOut } from "@/app/actions";
 
 const nav = [
-  { href: "/", label: "ภาพรวม", icon: Home }, { href: "/rooms", label: "ห้องพัก", icon: Building2 },
-  { href: "/tenants", label: "ผู้เช่า", icon: Users }, { href: "/leases", label: "สัญญาเช่า", icon: FileText },
-  { href: "/meters", label: "มิเตอร์", icon: Gauge }, { href: "/invoices", label: "วางบิล", icon: ClipboardList },
-  { href: "/rates", label: "อัตราค่าน้ำไฟ", icon: SlidersHorizontal },
-  { href: "/payments", label: "รับชำระ", icon: CreditCard }, { href: "/finance", label: "การเงิน", icon: Wallet },
-  { href: "/maintenance", label: "แจ้งซ่อม", icon: Wrench }, { href: "/announcements", label: "ประกาศ", icon: Megaphone },
-  { href: "/parcels", label: "พัสดุ", icon: Package }, { href: "/tasks", label: "งาน", icon: CalendarDays }, { href: "/settings", label: "ตั้งค่า", icon: Settings },
+  { href: "/", label: "ภาพรวม", icon: Home },
+  { href: "/rooms", label: "ห้องและผู้เช่า", icon: Building2 },
+  { href: "/meters", label: "จดน้ำและไฟ", icon: Gauge },
+  { href: "/invoices", label: "ค่าเช่าและบิล", icon: ClipboardList },
+  { href: "/settings", label: "ตั้งค่า", icon: Settings },
 ];
 
 export function AppShell({ children, current, userEmail, brandLogoUrl }: { children: React.ReactNode; current: string; userEmail: string; brandLogoUrl?: string | null }) {
