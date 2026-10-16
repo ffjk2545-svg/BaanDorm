@@ -191,8 +191,13 @@ export async function generateMonthlyInvoices(formData: FormData) {
     if (alreadyBilled.has(lease.id)) continue;
     const dueDay = Math.min(Number(lease.billing_day), daysInMonth);
     const dueDate = `${selectedMonth}-${String(dueDay).padStart(2, "0")}`;
-    const { error } = await supabase.rpc("generate_invoice", { p_lease_id: lease.id, p_period_start: periodStart, p_period_end: periodEnd, p_due_date: dueDate });
-    if (error) failed++;
+    const { data: invoiceId, error } = await supabase.rpc("generate_invoice", { p_lease_id: lease.id, p_period_start: periodStart, p_period_end: periodEnd, p_due_date: dueDate });
+    if (error || !invoiceId) {
+      failed++;
+      continue;
+    }
+    const { error: finalizeError } = await supabase.rpc("finalize_invoice", { p_invoice_id: invoiceId });
+    if (finalizeError) failed++;
     else created++;
   }
   redirect(`/invoices?created=${created}&skipped=${alreadyBilled.size}&failed=${failed}`);
