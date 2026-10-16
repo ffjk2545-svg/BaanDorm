@@ -22,6 +22,7 @@ export async function getWorkspace() {
   if (!supabase) return { supabase: null, user: null, organizationId: null };
   const { data: { user } } = await supabase.auth.getUser();
   if (!user) return { supabase, user: null, organizationId: null };
-  const { data } = await supabase.from("organization_members").select("organization_id").eq("user_id", user.id).limit(1).maybeSingle();
-  return { supabase, user, organizationId: data?.organization_id ?? null };
+  const { data } = await supabase.from("organization_members").select("organization_id,role").eq("user_id", user.id).limit(1).maybeSingle();
+  return { supabase, user, organizationId: data?.organization_id ?? null, role: data?.role ?? null };
 }
+

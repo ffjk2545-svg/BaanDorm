@@ -4,12 +4,14 @@ import { AppShell } from "@/components/app-shell";
 import { getWorkspace } from "@/lib/supabase/server";
 import { formatTHB } from "@/lib/finance";
 import { AnalyticsCharts, type ExpenseCategory, type MonthlyCashFlow, type MonthlyExpense, type MonthlyOccupancy } from "@/components/analytics-charts";
+import { DashboardRealtime } from "@/components/dashboard-realtime";
 
 export default async function Dashboard() {
-  const { supabase, user, organizationId } = await getWorkspace();
+  const { supabase, user, organizationId, role } = await getWorkspace();
   if (!supabase) return <main className="auth"><section className="auth-card"><div className="brand"><span className="brand-mark">⌂</span>KumkongApartment</div><h1>เชื่อมต่อฐานข้อมูล</h1><p className="subtitle">เพิ่มค่า Supabase ในไฟล์ .env.local แล้วเริ่มตั้งค่าระบบ</p><ol><li>สร้างโปรเจกต์ Supabase</li><li>รัน migration ใน <code>supabase/migrations</code></li><li>คัดลอกค่าจาก <code>.env.example</code> ไปยัง <code>.env.local</code></li></ol><Link className="button" href="/login">ไปหน้าเข้าสู่ระบบ</Link></section></main>;
   if (!user) redirect("/login");
   if (!organizationId) redirect("/setup");
+  if (role === "staff") redirect("/meters");
 
   const today = new Intl.DateTimeFormat("en-CA", { timeZone: "Asia/Bangkok", year: "numeric", month: "2-digit", day: "2-digit" }).format(new Date());
   const billingMonth = today.slice(0, 7);
@@ -21,19 +23,21 @@ export default async function Dashboard() {
     return { key, start: `${key}-01`, end: new Date(Date.UTC(date.getUTCFullYear(), date.getUTCMonth() + 1, 0)).toISOString().slice(0, 10), label: new Intl.DateTimeFormat("th-TH", { month: "short", timeZone: "Asia/Bangkok" }).format(new Date(`${key}-01T12:00:00+07:00`)) };
   });
   const analysisStart = `${analysisMonths[0].start}T00:00:00+07:00`;
-  const [roomsResult, leasesResult, invoicesResult, brand, paymentsHistory, expensesHistory] = await Promise.all([
+  const [roomsResult, leasesResult, invoicesResult, brand, paymentsHistory, expensesHistory, recentTicketsResult] = await Promise.all([
     supabase.from("rooms").select("id,room_number,status,monthly_rent").eq("organization_id", organizationId).order("room_number"),
     supabase.from("leases").select("id,room_id,rent_amount,start_date,end_date,status").eq("organization_id", organizationId).in("status", ["active", "ended"]),
     supabase.from("invoices").select("id,lease_id,invoice_number,total,status,due_date").eq("organization_id", organizationId).eq("period_start", `${billingMonth}-01`).order("due_date"),
     supabase.from("organizations").select("brand_logo_url").eq("id", organizationId).maybeSingle(),
     supabase.from("payments").select("invoice_id,amount,received_at").eq("organization_id", organizationId).gte("received_at", analysisStart).lte("received_at", new Date().toISOString()),
     supabase.from("expenses").select("amount,incurred_on,category").eq("organization_id", organizationId).gte("incurred_on", analysisMonths[0].start).lte("incurred_on", today),
+    supabase.from("maintenance_tickets").select("id,title,status,priority,created_at,room_id").eq("organization_id", organizationId).order("created_at", { ascending: false }).limit(5),
   ]);
   const roomRows = roomsResult.data ?? [];
   const allLeases = leasesResult.data ?? [];
   const leases = allLeases.filter(lease => lease.status === "active" && lease.start_date <= today && (!lease.end_date || lease.end_date >= today));
   const invoices = invoicesResult.data ?? [];
   const roomNumberById = new Map(roomRows.map(room => [room.id, room.room_number]));
+  const recentTickets = recentTicketsResult.data ?? [];
   const roomIdByLeaseId = new Map(leases.map(lease => [lease.id, lease.room_id]));
   const leasedRoomIds = new Set(leases.map(lease => lease.room_id));
   const occupied = leasedRoomIds.size;
@@ -72,7 +76,8 @@ export default async function Dashboard() {
   const forecastIncome = leases.reduce((sum, lease) => sum + Number(lease.rent_amount), 0);
   const forecast = { income: forecastIncome, expenses: forecastExpenses, net: forecastIncome - forecastExpenses };
 
-  return <AppShell current="/" userEmail={user.email ?? ""} brandLogoUrl={brand.data?.brand_logo_url}>
+  return <AppShell current="/" userEmail={user.email ?? ""} role={role} brandLogoUrl={brand.data?.brand_logo_url}>
+    <DashboardRealtime organizationId={organizationId}/>
     <section className="dashboard-hero">
       <div><span className="dashboard-eyebrow">ภาพรวมกิจการ · {monthLabel}</span><h1>สวัสดีครับ</h1><p>สรุปห้องพักและงานบิลที่ต้องดูแลในเดือนนี้</p></div>
       <Link className="button dashboard-primary" href={`/invoices?billing_month=${billingMonth}`}>จัดการบิล {monthLabel}<span aria-hidden="true"> →</span></Link>
@@ -109,6 +114,11 @@ export default async function Dashboard() {
         const roomNumber = roomNumberById.get(roomIdByLeaseId.get(invoice.lease_id) ?? "") ?? "—";
         return <Link className="pending-item" href={`/invoices?billing_month=${billingMonth}&preview=${invoice.id}`} key={invoice.id}><span className="pending-room">ห้อง {roomNumber}</span><span className="pending-invoice">{invoice.invoice_number}<small>ครบกำหนด {invoice.due_date}</small></span><strong>{formatTHB(Math.max(Number(invoice.total) - (paidByInvoice.get(invoice.id) ?? 0), 0))}</strong><span className={`badge ${invoice.status === "overdue" ? "warn" : ""}`}>{invoice.status === "overdue" ? "เกินกำหนด" : invoice.status === "partial" ? "ชำระบางส่วน" : "รอชำระ"}</span></Link>;
       })}{pendingInvoices.length > 6 && <Link className="pending-more" href={`/invoices?billing_month=${billingMonth}`}>ดูบิลค้างทั้งหมด {pendingInvoices.length} รายการ →</Link>}</div>}
+    </section>
+
+    <section className="card pending-panel">
+      <div className="dashboard-section-heading"><div><span className="dashboard-eyebrow">งานดูแลอาคาร</span><h2>แจ้งซ่อมล่าสุด</h2></div><Link className="text-link" href="/maintenance">ดูงานซ่อมทั้งหมด →</Link></div>
+      {recentTickets.length === 0 ? <p className="subtitle">ยังไม่มีรายการแจ้งซ่อม</p> : <div className="pending-list">{recentTickets.map(ticket => <Link className="pending-item" href="/maintenance" key={ticket.id}><span className="pending-room">ห้อง {roomNumberById.get(ticket.room_id ?? "") ?? "—"}</span><span className="pending-invoice">{ticket.title}<small>{new Intl.DateTimeFormat("th-TH", { dateStyle: "medium", timeStyle: "short", timeZone: "Asia/Bangkok" }).format(new Date(ticket.created_at))}</small></span><span className={`badge ${["urgent", "high"].includes(ticket.priority) ? "warn" : ""}`}>{ticket.status === "open" ? "รับแจ้งแล้ว" : ticket.status === "in_progress" ? "กำลังดำเนินการ" : ticket.status === "waiting" ? "รอดำเนินการ" : ticket.status === "resolved" ? "แก้ไขแล้ว" : "ปิดงาน"}</span></Link>)}</div>}
     </section>
 
     <AnalyticsCharts cashFlow={cashFlow} occupancy={occupancy} expenses={monthlyExpenses} categories={expenseCategories} forecast={forecast}/>

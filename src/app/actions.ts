@@ -412,6 +412,18 @@ export async function updateBrandSettings(formData:FormData) {
   redirect("/settings?saved=1");
 }
 
+export async function manageFamilyMember(formData: FormData) {
+  const parsed = z.object({ email: z.string().trim().email(), role: z.enum(["staff", "accountant"]) }).safeParse(Object.fromEntries(formData));
+  if (!parsed.success) redirect("/settings?error=กรุณาตรวจสอบอีเมลและสิทธิ์ที่เลือก");
+  const supabase = await createClient();
+  if (!supabase) redirect("/settings?error=ยังไม่ได้ตั้งค่า Supabase");
+  const { data: { user } } = await supabase.auth.getUser();
+  if (!user) redirect("/login");
+  const { error } = await supabase.rpc("manage_family_member", { p_email: parsed.data.email, p_role: parsed.data.role });
+  if (error) redirect(`/settings?error=${encodeURIComponent(error.message.includes("No registered account") ? "ยังไม่พบบัญชีนี้ ให้สมาชิกสมัครก่อนแล้วจึงกำหนดสิทธิ์" : "กำหนดสิทธิ์ไม่สำเร็จ เฉพาะเจ้าของกิจการจัดการบัญชีได้")}`);
+  redirect("/settings?saved=family");
+}
+
 export async function rotateTenantLineCode(formData:FormData) {
   const tenantId=z.string().uuid().safeParse(formData.get("tenant_id"));
   if(!tenantId.success)redirect("/tenants?error=ผู้เช่าไม่ถูกต้อง");
@@ -423,4 +435,5 @@ export async function rotateTenantLineCode(formData:FormData) {
   if(error||!data)redirect("/tenants?error=สร้างรหัส LINE ไม่สำเร็จ ผู้เช่าอาจเชื่อม LINE ไปแล้ว");
   redirect("/tenants?saved=1");
 }
+
 
