@@ -73,6 +73,7 @@ create policy meter_readings_staff_delete on public.meter_readings for delete to
 -- staff-read policies. Accountants retain finance access, owners/managers retain
 -- existing finance access.
 drop policy if exists invoices_staff_read on public.invoices;
+drop policy if exists invoices_finance_read on public.invoices;
 drop policy if exists invoices_finance_manage on public.invoices;
 create policy invoices_finance_read on public.invoices for select to authenticated
   using (public.has_org_role(organization_id, array['owner','manager','accountant']::public.member_role[]));
@@ -81,6 +82,7 @@ create policy invoices_finance_manage on public.invoices for all to authenticate
   with check (public.has_org_role(organization_id, array['owner','manager','accountant']::public.member_role[]));
 
 drop policy if exists invoice_items_staff_read on public.invoice_items;
+drop policy if exists invoice_items_finance_read on public.invoice_items;
 drop policy if exists invoice_items_finance_manage on public.invoice_items;
 create policy invoice_items_finance_read on public.invoice_items for select to authenticated
   using (public.has_org_role(organization_id, array['owner','manager','accountant']::public.member_role[]));
@@ -89,6 +91,7 @@ create policy invoice_items_finance_manage on public.invoice_items for all to au
   with check (public.has_org_role(organization_id, array['owner','manager','accountant']::public.member_role[]));
 
 drop policy if exists payments_staff_read on public.payments;
+drop policy if exists payments_finance_read on public.payments;
 drop policy if exists payments_finance_manage on public.payments;
 create policy payments_finance_read on public.payments for select to authenticated
   using (public.has_org_role(organization_id, array['owner','manager','accountant']::public.member_role[]));
@@ -97,6 +100,7 @@ create policy payments_finance_manage on public.payments for all to authenticate
   with check (public.has_org_role(organization_id, array['owner','manager','accountant']::public.member_role[]));
 
 drop policy if exists expenses_staff_read on public.expenses;
+drop policy if exists expenses_finance_read on public.expenses;
 drop policy if exists expenses_finance_manage on public.expenses;
 create policy expenses_finance_read on public.expenses for select to authenticated
   using (public.has_org_role(organization_id, array['owner','manager','accountant']::public.member_role[]));
@@ -105,6 +109,7 @@ create policy expenses_finance_manage on public.expenses for all to authenticate
   with check (public.has_org_role(organization_id, array['owner','manager','accountant']::public.member_role[]));
 
 drop policy if exists deposits_staff_read on public.security_deposits;
+drop policy if exists deposits_finance_read on public.security_deposits;
 drop policy if exists deposits_finance_manage on public.security_deposits;
 create policy deposits_finance_read on public.security_deposits for select to authenticated
   using (public.has_org_role(organization_id, array['owner','manager','accountant']::public.member_role[]));
@@ -158,6 +163,7 @@ create trigger maintenance_ticket_staff_guard before update on public.maintenanc
   for each row execute function public.guard_staff_ticket_update();
 
 drop policy if exists audit_events_member_read on public.audit_events;
+drop policy if exists audit_events_finance_read on public.audit_events;
 create policy audit_events_finance_read on public.audit_events for select to authenticated
   using (public.has_org_role(organization_id, array['owner','manager','accountant']::public.member_role[]));
 
@@ -173,40 +179,6 @@ create policy "Finance members upload private evidence" on storage.objects for i
   with check (bucket_id = 'property-evidence' and public.has_org_role((storage.foldername(name))[1]::uuid, array['owner','manager','accountant']::public.member_role[]));
 create policy "Finance members delete private evidence" on storage.objects for delete to authenticated
   using (bucket_id = 'property-evidence' and public.has_org_role((storage.foldername(name))[1]::uuid, array['owner','manager','accountant']::public.member_role[]));
-
--- Owners can add an already-registered family account and assign a limited
--- staff or finance role without exposing auth.users to the browser.
-create or replace function public.manage_family_member(p_email text, p_role public.member_role)
-returns void language plpgsql security definer set search_path = public, auth as $$
-declare
-  org_id uuid;
-  member_id uuid;
-begin
-  select o.id into org_id from public.organizations o where o.owner_user_id = auth.uid() limit 1;
-  if org_id is null then raise exception 'Only the organization owner can manage family access'; end if;
-  if p_role not in ('staff','accountant') then raise exception 'Unsupported family role'; end if;
-  if length(trim(coalesce(p_email, ''))) = 0 then raise exception 'Email is required'; end if;
-  select u.id into member_id from auth.users u where lower(u.email) = lower(trim(p_email)) limit 1;
-  if member_id is null then raise exception 'No registered account was found for this email'; end if;
-  if member_id = auth.uid() then raise exception 'The owner account role cannot be changed here'; end if;
-  insert into public.organization_members(organization_id,user_id,role)
-  values (org_id,member_id,p_role)
-  on conflict (organization_id,user_id) do update set role = excluded.role;
-end $$;
-revoke all on function public.manage_family_member(text,public.member_role) from public;
-grant execute on function public.manage_family_member(text,public.member_role) to authenticated;
-
-create or replace function public.list_family_members()
-returns table(user_id uuid, email text, role public.member_role)
-language sql stable security definer set search_path = public, auth as $$
-  select m.user_id,u.email,m.role
-  from public.organization_members m
-  join public.organizations o on o.id=m.organization_id and o.owner_user_id=auth.uid()
-  join auth.users u on u.id=m.user_id
-  order by case m.role when 'owner' then 0 when 'staff' then 1 else 2 end, lower(u.email)
-$$;
-revoke all on function public.list_family_members() from public;
-grant execute on function public.list_family_members() to authenticated;
 
 -- Enable Postgres Changes for the events that refresh the family dashboard.
 do $$
