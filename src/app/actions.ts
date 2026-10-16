@@ -28,8 +28,9 @@ export async function signUp(formData: FormData) {
   if (!parsed.success) redirect("/login?error=กรุณากรอกชื่อ อีเมล และรหัสผ่านอย่างน้อย 8 ตัวอักษร");
   const supabase = await createClient();
   if (!supabase) redirect("/login?error=ยังไม่ได้ตั้งค่า Supabase");
-  const { error } = await supabase.auth.signUp({ email: parsed.data.email, password: parsed.data.password, options: { data: { full_name: parsed.data.name } } });
+  const { data, error } = await supabase.auth.signUp({ email: parsed.data.email, password: parsed.data.password, options: { data: { full_name: parsed.data.name } } });
   if (error) redirect(`/login?error=${encodeURIComponent("สมัครสมาชิกไม่สำเร็จ กรุณาลองอีกครั้ง")}`);
+  if (data.session) redirect("/");
   redirect("/login?success=ส่งลิงก์ยืนยันไปที่อีเมลแล้ว");
 }
 
