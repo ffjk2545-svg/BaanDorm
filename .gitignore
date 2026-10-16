@@ -1,6 +1,7 @@
 node_modules/
 .next/
 .build-check/
+.family-build-check/
 .next-verify/
 out/
 coverage/

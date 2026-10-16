@@ -66,6 +66,23 @@ export async function createRoom(formData: FormData) {
   redirect("/rooms?saved=1");
 }
 
+export async function updateRoomStatus(formData: FormData) {
+  const parsed = z.object({ room_id: z.string().uuid(), status: z.enum(["available", "maintenance", "reserved"]) }).safeParse(Object.fromEntries(formData));
+  if (!parsed.success) redirect("/rooms?error=สถานะห้องไม่ถูกต้อง");
+  const supabase = await createClient();
+  if (!supabase) redirect("/rooms?error=ยังไม่ได้ตั้งค่า Supabase");
+  const { data: { user } } = await supabase.auth.getUser();
+  if (!user) redirect("/login");
+  const { data: membership } = await supabase.from("organization_members").select("organization_id,role").eq("user_id", user.id).limit(1).maybeSingle();
+  if (!membership) redirect("/setup");
+  if (!(membership.role === "owner" || membership.role === "manager")) redirect("/rooms?error=บัญชีนี้ไม่มีสิทธิ์เปลี่ยนสถานะห้อง");
+  const { data: activeLease } = await supabase.from("leases").select("id").eq("organization_id", membership.organization_id).eq("room_id", parsed.data.room_id).eq("status", "active").maybeSingle();
+  if (activeLease) redirect("/rooms?error=ห้องนี้มีผู้เช่าอยู่ เปลี่ยนสถานะไม่ได้");
+  const { data, error } = await supabase.from("rooms").update({ status: parsed.data.status }).eq("id", parsed.data.room_id).eq("organization_id", membership.organization_id).neq("status", "occupied").select("id").maybeSingle();
+  if (error || !data) redirect("/rooms?error=ห้องมีผู้เช่าอยู่หรือบันทึกสถานะไม่สำเร็จ");
+  redirect("/rooms?saved=status");
+}
+
 const tenantSchema = z.object({ full_name:z.string().trim().min(2).max(120), email:z.string().email().or(z.literal("")), phone:z.string().max(30), identity_number:z.string().max(40) });
 export async function createTenant(formData: FormData) {
   const parsed=tenantSchema.safeParse(Object.fromEntries(formData));
@@ -77,6 +94,27 @@ export async function createTenant(formData: FormData) {
   const {error}=await supabase.from("tenants").insert({...parsed.data,email:parsed.data.email||null,organization_id:membership.organization_id});
   if(error) redirect("/tenants?error=บันทึกข้อมูลไม่สำเร็จ");
   redirect("/tenants?saved=1");
+}
+
+const residentSchema = z.object({ room_id: z.string().uuid(), full_name: z.string().trim().min(2).max(120), phone: z.string().trim().max(30), rent_amount: z.coerce.number().nonnegative().max(10000000), deposit_amount: z.coerce.number().nonnegative().max(10000000), start_date: z.string().date(), billing_day: z.coerce.number().int().min(1).max(28) });
+export async function createResidentAndLease(formData: FormData) {
+  const parsed = residentSchema.safeParse(Object.fromEntries(formData));
+  if (!parsed.success) redirect("/rooms?error=กรุณาตรวจสอบห้อง ชื่อผู้เช่า และค่าเช่า");
+  const supabase = await createClient();
+  if (!supabase) redirect("/rooms?error=ยังไม่ได้ตั้งค่า Supabase");
+  const { data: { user } } = await supabase.auth.getUser();
+  if (!user) redirect("/login");
+  const { error } = await supabase.rpc("create_tenant_and_lease", {
+    p_room_id: parsed.data.room_id,
+    p_full_name: parsed.data.full_name,
+    p_phone: parsed.data.phone || null,
+    p_start_date: parsed.data.start_date,
+    p_rent_amount: parsed.data.rent_amount,
+    p_deposit_amount: parsed.data.deposit_amount,
+    p_billing_day: parsed.data.billing_day,
+  });
+  if (error) redirect(`/rooms?error=${encodeURIComponent("เพิ่มผู้เช่าไม่สำเร็จ ตรวจสอบว่าห้องยังว่างและวันที่เริ่มพักไม่ใช่วันในอนาคต")}`);
+  redirect("/rooms?saved=resident");
 }
 
 const meterSchema=z.object({room_id:z.string().uuid(),utility:z.enum(["water","electricity"]),reading_value:z.coerce.number().nonnegative(),read_at:z.string().date(),notes:z.string().max(500)});
@@ -104,12 +142,12 @@ export async function createLease(formData:FormData) {
 
 const endLeaseSchema=z.object({lease_id:z.string().uuid(),end_date:z.string().date(),refund:z.coerce.number().nonnegative(),deduction:z.coerce.number().nonnegative(),notes:z.string().max(500)});
 export async function endLease(formData:FormData) {
-  const parsed=endLeaseSchema.safeParse(Object.fromEntries(formData));if(!parsed.success)redirect("/leases?error=กรุณาตรวจสอบการย้ายออก");
-  const supabase=await createClient();if(!supabase)redirect("/leases?error=ยังไม่ได้ตั้งค่า Supabase");
+  const parsed=endLeaseSchema.safeParse(Object.fromEntries(formData));if(!parsed.success)redirect("/rooms?error=กรุณาตรวจสอบข้อมูลการย้ายออก");
+  const supabase=await createClient();if(!supabase)redirect("/rooms?error=ยังไม่ได้ตั้งค่า Supabase");
   const {data:{user}}=await supabase.auth.getUser();if(!user)redirect("/login");
   const {error}=await supabase.rpc("end_lease",{p_lease_id:parsed.data.lease_id,p_end_date:parsed.data.end_date,p_refund:parsed.data.refund,p_deduction:parsed.data.deduction,p_notes:parsed.data.notes||null});
-  if(error)redirect(`/leases?error=${encodeURIComponent("ปิดสัญญาไม่สำเร็จ ตรวจสอบวันย้ายออกและยอดคืน/หักเงินประกัน")}`);
-  redirect("/leases?saved=1");
+  if(error)redirect(`/rooms?error=${encodeURIComponent("บันทึกย้ายออกไม่สำเร็จ ตรวจสอบวันที่และยอดเงินประกัน")}`);
+  redirect("/rooms?saved=moveout");
 }
 
 const invoiceSchema=z.object({lease_id:z.string().uuid(),period_start:z.string().date(),period_end:z.string().date(),due_date:z.string().date()});
@@ -120,6 +158,49 @@ export async function generateInvoice(formData:FormData) {
   const {data,error}=await supabase.rpc("generate_invoice",{p_lease_id:parsed.data.lease_id,p_period_start:parsed.data.period_start,p_period_end:parsed.data.period_end,p_due_date:parsed.data.due_date});
   if(error||!data)redirect(`/invoices?error=${encodeURIComponent("คำนวณบิลไม่สำเร็จ ตรวจสอบสัญญา รอบบิล และเลขมิเตอร์")}`);
   redirect(`/invoices?preview=${data}`);
+}
+
+export async function generateMonthlyInvoices(formData: FormData) {
+  const billingMonth = z.string().regex(/^\d{4}-(0[1-9]|1[0-2])$/).safeParse(formData.get("billing_month"));
+  if (!billingMonth.success) redirect("/invoices?error=เลือกเดือนที่ต้องการออกบิล");
+  const supabase = await createClient();
+  if (!supabase) redirect("/invoices?error=ยังไม่ได้ตั้งค่า Supabase");
+  const { data: { user } } = await supabase.auth.getUser();
+  if (!user) redirect("/login");
+  const { data: membership } = await supabase.from("organization_members").select("organization_id,role").eq("user_id", user.id).limit(1).maybeSingle();
+  if (!membership) redirect("/setup");
+  if (!("owner manager accountant".split(" ").includes(membership.role))) redirect("/invoices?error=บัญชีนี้ไม่มีสิทธิ์สร้างบิล");
+
+  const selectedMonth = billingMonth.data;
+  const [year, month] = selectedMonth.split("-").map(Number);
+  const periodStart = `${selectedMonth}-01`;
+  const daysInMonth = new Date(Date.UTC(year, month, 0)).getUTCDate();
+  const periodEnd = `${selectedMonth}-${String(daysInMonth).padStart(2, "0")}`;
+  const { data: leaseRows, error: leasesError } = await supabase.from("leases").select("id,billing_day,start_date,end_date").eq("organization_id", membership.organization_id).eq("status", "active");
+  if (leasesError) redirect("/invoices?error=โหลดรายชื่อห้องที่มีผู้เช่าไม่สำเร็จ");
+  const leases = (leaseRows ?? []).filter(lease => lease.start_date <= periodEnd && (!lease.end_date || lease.end_date >= periodStart));
+  if (!leases?.length) redirect("/invoices?created=0&skipped=0&failed=0");
+
+  const leaseIds = leases.map(lease => lease.id);
+  const { data: existing, error: existingError } = await supabase.from("invoices").select("lease_id").eq("organization_id", membership.organization_id).eq("period_start", periodStart).eq("period_end", periodEnd).in("lease_id", leaseIds);
+  if (existingError) redirect("/invoices?error=ตรวจสอบบิลประจำเดือนไม่สำเร็จ");
+  const alreadyBilled = new Set((existing ?? []).map(invoice => invoice.lease_id));
+  let created = 0;
+  let failed = 0;
+  for (const lease of leases) {
+    if (alreadyBilled.has(lease.id)) continue;
+    const dueDay = Math.min(Number(lease.billing_day), daysInMonth);
+    const dueDate = `${selectedMonth}-${String(dueDay).padStart(2, "0")}`;
+    const { data: invoiceId, error } = await supabase.rpc("generate_invoice", { p_lease_id: lease.id, p_period_start: periodStart, p_period_end: periodEnd, p_due_date: dueDate });
+    if (error || !invoiceId) {
+      failed++;
+      continue;
+    }
+    const { error: finalizeError } = await supabase.rpc("finalize_invoice", { p_invoice_id: invoiceId });
+    if (finalizeError) failed++;
+    else created++;
+  }
+  redirect(`/invoices?created=${created}&skipped=${alreadyBilled.size}&failed=${failed}`);
 }
 
 const invoiceFeeSchema=z.object({invoice_id:z.string().uuid(),description:z.string().trim().min(1).max(120),amount:z.coerce.number().positive().max(10000000)});
@@ -175,8 +256,7 @@ export async function finalizeInvoice(formData:FormData) {
   const {data:{user}}=await supabase.auth.getUser();if(!user)redirect("/login");
   const {error}=await supabase.rpc("finalize_invoice",{p_invoice_id:parsed.data});
   if(error)redirect("/invoices?error=ยืนยันใบแจ้งหนี้ไม่สำเร็จ กรุณาตรวจสอบสิทธิ์และสถานะบิล");
-  const lineError=process.env.LINE_CHANNEL_ACCESS_TOKEN?await pushInvoiceLine(parsed.data):null;
-  redirect(lineError?`/invoices?preview=${parsed.data}&saved=1&line_error=${encodeURIComponent(lineError)}`:`/invoices?preview=${parsed.data}&saved=1&line=sent`);
+  redirect(`/invoices?preview=${parsed.data}&saved=1`);
 }
 
 const paymentSchema=z.object({invoice_id:z.string().uuid(),amount:z.coerce.number().positive(),method:z.enum(["cash","bank_transfer","promptpay","card","other"]),reference:z.string().max(100)});
