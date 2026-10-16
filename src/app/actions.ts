@@ -40,12 +40,11 @@ export async function createOrganization(formData: FormData) {
   if (!supabase) redirect("/setup?error=ยังไม่ได้ตั้งค่า Supabase");
   const { data: { user } } = await supabase.auth.getUser();
   if (!user) redirect("/login");
-  const { data: org, error: orgError } = await supabase.from("organizations").insert({ name: parsed.data.name, owner_user_id: user.id }).select("id").single();
-  if (orgError || !org) redirect("/setup?error=สร้างกิจการไม่สำเร็จ");
-  const { error: memberError } = await supabase.from("organization_members").insert({ organization_id: org.id, user_id: user.id, role: "owner" });
-  if (memberError) redirect("/setup?error=สร้างสิทธิ์เจ้าของไม่สำเร็จ กรุณาตรวจสอบ Supabase");
-  const { error: propertyError } = await supabase.from("properties").insert({ organization_id: org.id, name: parsed.data.property });
-  if (propertyError) redirect("/setup?error=กิจการถูกสร้างแล้ว แต่สร้างอาคารไม่สำเร็จ");
+  const { error } = await supabase.rpc("create_organization_with_property", {
+    p_name: parsed.data.name,
+    p_property_name: parsed.data.property,
+  });
+  if (error) redirect(`/setup?error=${encodeURIComponent("สร้างกิจการไม่สำเร็จ กรุณาลองอีกครั้ง หรือติดต่อผู้ดูแลระบบ")}`);
   redirect("/");
 }
 
