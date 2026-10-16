@@ -186,28 +186,31 @@ export async function generateMonthlyInvoices(formData: FormData) {
   const { data: leaseRows, error: leasesError } = await supabase.from("leases").select("id,billing_day,start_date,end_date").eq("organization_id", membership.organization_id).eq("status", "active");
   if (leasesError) redirect("/invoices?error=โหลดรายชื่อห้องที่มีผู้เช่าไม่สำเร็จ");
   const leases = (leaseRows ?? []).filter(lease => lease.start_date <= periodEnd && (!lease.end_date || lease.end_date >= periodStart));
-  if (!leases?.length) redirect("/invoices?created=0&skipped=0&failed=0");
+  if (!leases.length) redirect(`/invoices?billing_month=${selectedMonth}&created=0&skipped=0&failed=0`);
 
   const leaseIds = leases.map(lease => lease.id);
   const { data: existing, error: existingError } = await supabase.from("invoices").select("lease_id").eq("organization_id", membership.organization_id).eq("period_start", periodStart).eq("period_end", periodEnd).in("lease_id", leaseIds);
   if (existingError) redirect("/invoices?error=ตรวจสอบบิลประจำเดือนไม่สำเร็จ");
   const alreadyBilled = new Set((existing ?? []).map(invoice => invoice.lease_id));
+  const pendingLeases = leases.filter(lease => !alreadyBilled.has(lease.id));
   let created = 0;
   let failed = 0;
-  for (const lease of leases) {
-    if (alreadyBilled.has(lease.id)) continue;
-    const dueDay = Math.min(Number(lease.billing_day), daysInMonth);
-    const dueDate = `${selectedMonth}-${String(dueDay).padStart(2, "0")}`;
-    const { data: invoiceId, error } = await supabase.rpc("generate_invoice", { p_lease_id: lease.id, p_period_start: periodStart, p_period_end: periodEnd, p_due_date: dueDate });
-    if (error || !invoiceId) {
-      failed++;
-      continue;
-    }
-    const { error: finalizeError } = await supabase.rpc("finalize_invoice", { p_invoice_id: invoiceId });
-    if (finalizeError) failed++;
-    else created++;
+  // Keep a small concurrency limit so a 28-room monthly run finishes quickly
+  // without flooding a free Supabase project with 56 simultaneous RPC calls.
+  for (let index = 0; index < pendingLeases.length; index += 7) {
+    const batch = pendingLeases.slice(index, index + 7);
+    const results = await Promise.all(batch.map(async lease => {
+      const dueDay = Math.min(Number(lease.billing_day), daysInMonth);
+      const dueDate = `${selectedMonth}-${String(dueDay).padStart(2, "0")}`;
+      const { data: invoiceId, error } = await supabase.rpc("generate_invoice", { p_lease_id: lease.id, p_period_start: periodStart, p_period_end: periodEnd, p_due_date: dueDate });
+      if (error || !invoiceId) return false;
+      const { error: finalizeError } = await supabase.rpc("finalize_invoice", { p_invoice_id: invoiceId });
+      return !finalizeError;
+    }));
+    created += results.filter(Boolean).length;
+    failed += results.filter(result => !result).length;
   }
-  redirect(`/invoices?created=${created}&skipped=${alreadyBilled.size}&failed=${failed}`);
+  redirect(`/invoices?billing_month=${selectedMonth}&created=${created}&skipped=${alreadyBilled.size}&failed=${failed}`);
 }
 
 const invoiceFeeSchema=z.object({invoice_id:z.string().uuid(),description:z.string().trim().min(1).max(120),amount:z.coerce.number().positive().max(10000000)});
@@ -419,3 +422,4 @@ export async function rotateTenantLineCode(formData:FormData) {
   if(error||!data)redirect("/tenants?error=สร้างรหัส LINE ไม่สำเร็จ ผู้เช่าอาจเชื่อม LINE ไปแล้ว");
   redirect("/tenants?saved=1");
 }
+

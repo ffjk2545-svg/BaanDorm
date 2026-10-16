@@ -10,40 +10,86 @@ export default async function Dashboard() {
   if (!user) redirect("/login");
   if (!organizationId) redirect("/setup");
 
-  const [rooms, invoices, payments, brand] = await Promise.all([
+  const today = new Intl.DateTimeFormat("en-CA", { timeZone: "Asia/Bangkok", year: "numeric", month: "2-digit", day: "2-digit" }).format(new Date());
+  const billingMonth = today.slice(0, 7);
+  const monthLabel = new Intl.DateTimeFormat("th-TH", { month: "long", year: "numeric", timeZone: "Asia/Bangkok" }).format(new Date(`${billingMonth}-01T12:00:00+07:00`));
+  const [roomsResult, leasesResult, invoicesResult, brand] = await Promise.all([
     supabase.from("rooms").select("id,room_number,status,monthly_rent").eq("organization_id", organizationId).order("room_number"),
-    supabase.from("invoices").select("id,total,status").eq("organization_id", organizationId).in("status", ["issued", "partial", "overdue"]),
-    supabase.from("payments").select("invoice_id,amount").eq("organization_id", organizationId),
+    supabase.from("leases").select("id,room_id").eq("organization_id", organizationId).eq("status", "active"),
+    supabase.from("invoices").select("id,lease_id,invoice_number,total,status,due_date").eq("organization_id", organizationId).eq("period_start", `${billingMonth}-01`).order("due_date"),
     supabase.from("organizations").select("brand_logo_url").eq("id", organizationId).maybeSingle(),
   ]);
-  const roomRows = rooms.data ?? [];
-  const occupied = roomRows.filter(room => room.status === "occupied").length;
-  const available = roomRows.filter(room => room.status === "available").length;
+  const roomRows = roomsResult.data ?? [];
+  const leases = leasesResult.data ?? [];
+  const invoices = invoicesResult.data ?? [];
+  const roomNumberById = new Map(roomRows.map(room => [room.id, room.room_number]));
+  const roomIdByLeaseId = new Map(leases.map(lease => [lease.id, lease.room_id]));
+  const leasedRoomIds = new Set(leases.map(lease => lease.room_id));
+  const occupied = leasedRoomIds.size;
+  const vacant = roomRows.filter(room => !leasedRoomIds.has(room.id) && room.status === "available").length;
+  const maintenance = roomRows.filter(room => room.status === "maintenance").length;
+  const reserved = roomRows.filter(room => room.status === "reserved").length;
+  const invoicedLeaseIds = new Set(invoices.map(invoice => invoice.lease_id));
+  const missingBills = leases.length - invoicedLeaseIds.size;
+  const invoiceIds = invoices.map(invoice => invoice.id);
+  const paymentsResult = invoiceIds.length
+    ? await supabase.from("payments").select("invoice_id,amount").eq("organization_id", organizationId).in("invoice_id", invoiceIds)
+    : { data: [] as Array<{ invoice_id: string; amount: number | string }> };
   const paidByInvoice = new Map<string, number>();
-  payments.data?.forEach(payment => paidByInvoice.set(payment.invoice_id, (paidByInvoice.get(payment.invoice_id) ?? 0) + Number(payment.amount)));
-  const outstanding = invoices.data?.reduce((sum, invoice) => sum + Math.max(Number(invoice.total) - (paidByInvoice.get(invoice.id) ?? 0), 0), 0) ?? 0;
+  paymentsResult.data?.forEach(payment => paidByInvoice.set(payment.invoice_id, (paidByInvoice.get(payment.invoice_id) ?? 0) + Number(payment.amount)));
+  const outstanding = invoices.reduce((sum, invoice) => sum + Math.max(Number(invoice.total) - (paidByInvoice.get(invoice.id) ?? 0), 0), 0);
+  const paidCount = invoices.filter(invoice => invoice.status === "paid").length;
+  const pendingInvoices = invoices.filter(invoice => invoice.status !== "paid" && invoice.status !== "void").sort((a, b) => String(roomNumberById.get(roomIdByLeaseId.get(a.lease_id) ?? "") ?? "").localeCompare(String(roomNumberById.get(roomIdByLeaseId.get(b.lease_id) ?? "") ?? ""), "th", { numeric: true }));
+  const progress = leases.length ? Math.min(100, Math.round(invoicedLeaseIds.size / leases.length * 100)) : 0;
 
   return <AppShell current="/" userEmail={user.email ?? ""} brandLogoUrl={brand.data?.brand_logo_url}>
-    <div className="page-heading"><div><h1>ภาพรวม</h1><p className="subtitle">ดูห้องว่าง ห้องที่มีผู้เช่า และบิลที่ยังต้องติดตาม</p></div><Link className="button" href="/rooms">จัดการห้องพัก</Link></div>
-    <section className="metric-grid">
-      <Metric label="ห้องทั้งหมด" value={String(roomRows.length)} note="จำนวนห้องในกิจการ"/>
-      <Metric label="มีผู้เช่า" value={String(occupied)} note="ห้องที่กำลังคิดค่าเช่า"/>
-      <Metric label="ห้องว่าง" value={String(available)} note="พร้อมเพิ่มผู้เช่า"/>
-      <Metric label="ยอดบิลที่ต้องติดตาม" value={formatTHB(outstanding)} note={`${invoices.data?.length ?? 0} บิลที่ยังไม่ชำระครบ`}/>
+    <section className="dashboard-hero">
+      <div><span className="dashboard-eyebrow">ภาพรวมกิจการ · {monthLabel}</span><h1>สวัสดีครับ</h1><p>สรุปห้องพักและงานบิลที่ต้องดูแลในเดือนนี้</p></div>
+      <Link className="button dashboard-primary" href={`/invoices?billing_month=${billingMonth}`}>จัดการบิล {monthLabel}<span aria-hidden="true"> →</span></Link>
     </section>
-    <section className="card" style={{marginBottom:18}}>
-      <h2 className="section-title">ทำรายการ</h2>
-      <div className="quick-actions">
-        <Link className="quick-action" href="/rooms"><strong>เพิ่มห้องหรือผู้เช่า</strong><span>ดูสถานะห้องทั้งหมดในหน้าเดียว</span></Link>
-        <Link className="quick-action" href="/meters"><strong>จดมิเตอร์น้ำและไฟ</strong><span>น้ำ 12 บาท/หน่วย · ไฟ 8 บาท/หน่วย</span></Link>
-        <Link className="quick-action" href="/invoices"><strong>คิดค่าเช่าประจำเดือน</strong><span>ออกบิลให้ห้องที่มีผู้เช่าด้วยปุ่มเดียว</span></Link>
-      </div>
+
+    <section className="dashboard-stats">
+      <Stat label="ห้องที่มีผู้เช่า" value={`${occupied} / ${roomRows.length}`} note="ห้องที่กำลังใช้งาน" tone="teal"/>
+      <Stat label="ห้องว่าง" value={String(vacant)} note={`${reserved} ห้องจอง · ${maintenance} ห้องปิดซ่อม`} tone="blue"/>
+      <Stat label="บิลที่ออกแล้ว" value={`${invoicedLeaseIds.size} / ${leases.length}`} note={`รอบเดือน ${monthLabel}`} tone="violet"/>
+      <Stat label="ยอดค้างรับรอบนี้" value={formatTHB(outstanding)} note={`${paidCount} ห้องชำระครบแล้ว`} tone="amber"/>
     </section>
-    <section className="card">
-      <h2 className="section-title">สถานะห้อง</h2>
-      {roomRows.length === 0 ? <div className="empty"><strong>ยังไม่มีห้องพัก</strong>เพิ่มห้องแรกเพื่อเริ่มจัดการหอพัก<p><Link className="button" href="/rooms">เพิ่มห้องพัก</Link></p></div> : <div className="room-grid">{roomRows.map(room => <article className="room-card" key={room.id}><div className="room-card-heading"><strong>ห้อง {room.room_number}</strong><span className={`badge ${room.status === "occupied" ? "good" : room.status === "maintenance" ? "warn" : ""}`}>{room.status === "occupied" ? "มีผู้เช่า" : room.status === "maintenance" ? "ปิดซ่อม" : room.status === "reserved" ? "จองแล้ว" : "ว่าง"}</span></div><p>ค่าเช่า {formatTHB(Number(room.monthly_rent))}/เดือน</p></article>)}</div>}
+
+    <div className="dashboard-columns">
+      <section className="card billing-overview">
+        <div className="dashboard-section-heading"><div><span className="dashboard-eyebrow">งานประจำเดือน</span><h2>ออกบิลค่าเช่า</h2></div><Link className="text-link" href={`/invoices?billing_month=${billingMonth}`}>เปิดรายการบิล →</Link></div>
+        {leases.length === 0 ? <div className="empty compact-empty"><strong>ยังไม่มีห้องที่มีสัญญา</strong>เริ่มจากเพิ่มผู้เช่าเข้าห้องเพื่อให้ระบบจัดบิลได้<p><Link className="button" href="/rooms">จัดการห้องและผู้เช่า</Link></p></div> : <>
+          <div className="billing-progress-copy"><strong>ออกบิลแล้ว {invoicedLeaseIds.size} จาก {leases.length} ห้อง</strong><span>{missingBills === 0 ? "ครบทุกห้องแล้ว" : `เหลืออีก ${missingBills} ห้อง`}</span></div>
+          <div className="progress-track" role="progressbar" aria-label="ความคืบหน้าการออกบิล" aria-valuenow={progress} aria-valuemin={0} aria-valuemax={100}><span style={{ width: `${progress}%` }}/></div>
+          {missingBills > 0 && <p className="dashboard-hint">กดครั้งเดียวเพื่อออกบิลให้ห้องที่ยังไม่มี ระบบจะข้ามห้องที่ออกแล้ว</p>}
+          <Link className="button" href={`/invoices?billing_month=${billingMonth}${missingBills ? "#create" : ""}`}>{missingBills ? `ออกบิลที่เหลือ ${missingBills} ห้อง` : "ตรวจสอบบิลประจำเดือน"}</Link>
+        </>}
+      </section>
+
+      <section className="card room-summary">
+        <div className="dashboard-section-heading"><div><span className="dashboard-eyebrow">สถานะปัจจุบัน</span><h2>ห้องพัก</h2></div><Link className="text-link" href="/rooms">ดูห้องทั้งหมด →</Link></div>
+        <div className="room-status-list"><Status label="มีผู้เช่า" count={occupied} total={roomRows.length} tone="occupied"/><Status label="ว่าง" count={vacant} total={roomRows.length} tone="vacant"/><Status label="จองแล้ว" count={reserved} total={roomRows.length} tone="reserved"/><Status label="ปิดซ่อม" count={maintenance} total={roomRows.length} tone="maintenance"/></div>
+        {roomRows.length === 0 && <Link className="button secondary" href="/rooms">เพิ่มห้องแรก</Link>}
+      </section>
+    </div>
+
+    <section className="card pending-panel">
+      <div className="dashboard-section-heading"><div><span className="dashboard-eyebrow">ติดตามรับชำระ</span><h2>บิลที่ยังไม่ชำระครบ</h2><p className="subtitle">ระบุเลขห้องและเลขที่บิล เพื่อให้หาได้ทันที</p></div><Link className="button secondary" href="/payments">บันทึกรับชำระ</Link></div>
+      {pendingInvoices.length === 0 ? <div className="empty compact-empty"><strong>{invoices.length ? "เยี่ยมเลย ชำระครบทุกบิลแล้ว" : "ยังไม่มีบิลในรอบนี้"}</strong>{invoices.length ? "ไม่มีรายการค้างรับที่ต้องติดตาม" : "เริ่มออกบิลเมื่อพร้อมได้จากหน้าค่าเช่าและบิล"}{!invoices.length && <p><Link className="button" href={`/invoices?billing_month=${billingMonth}`}>ไปหน้าออกบิล</Link></p>}</div> : <div className="pending-list">{pendingInvoices.slice(0, 6).map(invoice => {
+        const roomNumber = roomNumberById.get(roomIdByLeaseId.get(invoice.lease_id) ?? "") ?? "—";
+        return <Link className="pending-item" href={`/invoices?billing_month=${billingMonth}&preview=${invoice.id}`} key={invoice.id}><span className="pending-room">ห้อง {roomNumber}</span><span className="pending-invoice">{invoice.invoice_number}<small>ครบกำหนด {invoice.due_date}</small></span><strong>{formatTHB(Math.max(Number(invoice.total) - (paidByInvoice.get(invoice.id) ?? 0), 0))}</strong><span className={`badge ${invoice.status === "overdue" ? "warn" : ""}`}>{invoice.status === "overdue" ? "เกินกำหนด" : invoice.status === "partial" ? "ชำระบางส่วน" : "รอชำระ"}</span></Link>;
+      })}{pendingInvoices.length > 6 && <Link className="pending-more" href={`/invoices?billing_month=${billingMonth}`}>ดูบิลค้างทั้งหมด {pendingInvoices.length} รายการ →</Link>}</div>}
     </section>
+
+    <section className="dashboard-shortcuts"><Link href="/meters"><span className="shortcut-icon">↗</span><span><strong>จดมิเตอร์น้ำและไฟ</strong><small>น้ำ 12 บาท/หน่วย · ไฟ 8 บาท/หน่วย</small></span><b>→</b></Link><Link href="/rooms"><span className="shortcut-icon">⌂</span><span><strong>สถานะห้องและผู้เช่า</strong><small>ดูห้องว่าง ย้ายเข้า หรือบันทึกย้ายออก</small></span><b>→</b></Link></section>
   </AppShell>;
 }
 
-function Metric({label,value,note}:{label:string;value:string;note:string}) { return <div className="card"><div className="metric-label">{label}</div><div className="metric-value">{value}</div><div className="metric-note">{note}</div></div>; }
+function Stat({ label, value, note, tone }: { label: string; value: string; note: string; tone: string }) {
+  return <div className={`card dashboard-stat ${tone}`}><span className="metric-label">{label}</span><strong className="metric-value">{value}</strong><span className="metric-note">{note}</span></div>;
+}
+
+function Status({ label, count, total, tone }: { label: string; count: number; total: number; tone: string }) {
+  return <div className="room-status-item"><span className={`status-dot ${tone}`}/><span>{label}</span><strong>{count}</strong><small>{total ? `${Math.round(count / total * 100)}%` : "0%"}</small></div>;
+}
+
