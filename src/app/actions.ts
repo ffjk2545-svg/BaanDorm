@@ -2,6 +2,7 @@
 
 import { redirect } from "next/navigation";
 import { z } from "zod";
+import { randomUUID } from "node:crypto";
 import { createClient } from "@/lib/supabase/server";
 
 const credentials = z.object({ email: z.string().email(), password: z.string().min(8) });
@@ -86,8 +87,8 @@ export async function recordMeter(formData:FormData) {
   const {data:membership}=await supabase.from("organization_members").select("organization_id").eq("user_id",user.id).limit(1).maybeSingle(); if(!membership) redirect("/setup");
   const {data:previous}=await supabase.from("meter_readings").select("reading_value").eq("organization_id",membership.organization_id).eq("room_id",parsed.data.room_id).eq("utility",parsed.data.utility).lt("read_at",parsed.data.read_at).order("read_at",{ascending:false}).limit(1).maybeSingle();
   if(previous && parsed.data.reading_value<Number(previous.reading_value)) redirect("/meters?error=เลขมิเตอร์ต้องไม่น้อยกว่าครั้งก่อน");
-  const {error}=await supabase.from("meter_readings").insert({...parsed.data,organization_id:membership.organization_id,captured_by:user.id});
-  if(error) redirect("/meters?error=บันทึกไม่สำเร็จ อาจมีข้อมูลของวันที่นี้แล้ว");
+  const {error}=await supabase.from("meter_readings").upsert({...parsed.data,organization_id:membership.organization_id,captured_by:user.id},{onConflict:"room_id,utility,read_at"});
+  if(error) redirect(`/meters?error=${encodeURIComponent("บันทึกไม่สำเร็จ ตรวจสอบว่าห้องและเลขมิเตอร์ถูกต้อง")}`);
   redirect("/meters?saved=1");
 }
 
@@ -121,13 +122,61 @@ export async function generateInvoice(formData:FormData) {
   redirect(`/invoices?preview=${data}`);
 }
 
+const invoiceFeeSchema=z.object({invoice_id:z.string().uuid(),description:z.string().trim().min(1).max(120),amount:z.coerce.number().positive().max(10000000)});
+export async function addInvoiceFee(formData:FormData) {
+  const parsed=invoiceFeeSchema.safeParse(Object.fromEntries(formData));
+  if(!parsed.success)redirect("/invoices?error=กรุณาตรวจสอบชื่อและจำนวนค่าใช้จ่าย");
+  const supabase=await createClient();if(!supabase)redirect("/invoices?error=ยังไม่ได้ตั้งค่า Supabase");
+  const {error}=await supabase.rpc("add_invoice_fee",{p_invoice_id:parsed.data.invoice_id,p_description:parsed.data.description,p_amount:parsed.data.amount});
+  if(error)redirect(`/invoices?preview=${parsed.data.invoice_id}&error=${encodeURIComponent("เพิ่มค่าใช้จ่ายไม่สำเร็จ ตรวจสอบว่าบิลยังเป็นฉบับร่าง")}`);
+  redirect(`/invoices?preview=${parsed.data.invoice_id}&saved=1`);
+}
+
+async function pushInvoiceLine(invoiceId:string) {
+  const accessToken=process.env.LINE_CHANNEL_ACCESS_TOKEN;
+  if(!accessToken) return "ยังไม่ได้ตั้งค่า LINE_CHANNEL_ACCESS_TOKEN ใน Vercel";
+  const supabase=await createClient();
+  if(!supabase) return "ยังไม่ได้ตั้งค่า Supabase";
+  const {data:{user}}=await supabase.auth.getUser();
+  if(!user) return "ไม่พบผู้ใช้ที่เข้าสู่ระบบ";
+  const {data:membership}=await supabase.from("organization_members").select("organization_id,role").eq("user_id",user.id).limit(1).maybeSingle();
+  if(!membership||!(["owner","manager","accountant"].includes(membership.role))) return "บัญชีนี้ไม่มีสิทธิ์ส่งบิล";
+  const {data:invoice}=await supabase.from("invoices").select("id,organization_id,invoice_number,total,due_date,public_token,tenant_id,status").eq("id",invoiceId).eq("organization_id",membership.organization_id).maybeSingle();
+  if(!invoice||invoice.status==="draft"||invoice.status==="void") return "ไม่พบใบแจ้งหนี้ที่ออกแล้ว";
+  const {data:tenant}=await supabase.from("tenants").select("full_name,line_user_id").eq("id",invoice.tenant_id).eq("organization_id",membership.organization_id).maybeSingle();
+  if(!tenant?.line_user_id) return "ยังไม่ได้บันทึก LINE User ID ของผู้เช่ารายนี้";
+  const baseUrl=process.env.NEXT_PUBLIC_APP_URL??(process.env.VERCEL_URL?`https://${process.env.VERCEL_URL}`:null);
+  if(!baseUrl) return "ยังไม่ได้ตั้งค่า NEXT_PUBLIC_APP_URL ใน Vercel";
+  const billUrl=`${baseUrl.replace(/\/$/,"")}/bill/${invoice.public_token}`;
+  try {
+    const response=await fetch("https://api.line.me/v2/bot/message/push",{
+      method:"POST",
+      headers:{"Content-Type":"application/json",Authorization:`Bearer ${accessToken}`},
+      body:JSON.stringify({to:tenant.line_user_id,messages:[{type:"text",text:`แจ้งบิลค่าเช่า ${invoice.invoice_number}\n${tenant.full_name}\nยอดชำระ ${Number(invoice.total).toLocaleString("th-TH")} บาท\nครบกำหนด ${invoice.due_date}\nดูใบแจ้งหนี้และ QR PromptPay: ${billUrl}`}]}),
+    });
+    if(!response.ok) return "LINE ส่งข้อความไม่สำเร็จ ตรวจสอบ Channel Access Token และ LINE User ID";
+    await supabase.rpc("mark_invoice_line_sent",{p_invoice_id:invoice.id});
+    return null;
+  } catch {
+    return "เชื่อมต่อ LINE ไม่สำเร็จ กรุณาลองส่งบิลอีกครั้ง";
+  }
+}
+
+export async function sendInvoiceLine(formData:FormData) {
+  const invoiceId=z.string().uuid().safeParse(formData.get("invoice_id"));
+  if(!invoiceId.success)redirect("/invoices?error=ใบแจ้งหนี้ไม่ถูกต้อง");
+  const error=await pushInvoiceLine(invoiceId.data);
+  redirect(error?`/invoices?preview=${invoiceId.data}&line_error=${encodeURIComponent(error)}`:`/invoices?preview=${invoiceId.data}&line=sent`);
+}
+
 export async function finalizeInvoice(formData:FormData) {
   const parsed=z.string().uuid().safeParse(formData.get("invoice_id"));if(!parsed.success)redirect("/invoices?error=ใบแจ้งหนี้ไม่ถูกต้อง");
   const supabase=await createClient();if(!supabase)redirect("/invoices?error=ยังไม่ได้ตั้งค่า Supabase");
   const {data:{user}}=await supabase.auth.getUser();if(!user)redirect("/login");
   const {error}=await supabase.rpc("finalize_invoice",{p_invoice_id:parsed.data});
   if(error)redirect("/invoices?error=ยืนยันใบแจ้งหนี้ไม่สำเร็จ กรุณาตรวจสอบสิทธิ์และสถานะบิล");
-  redirect("/invoices?saved=1");
+  const lineError=process.env.LINE_CHANNEL_ACCESS_TOKEN?await pushInvoiceLine(parsed.data):null;
+  redirect(lineError?`/invoices?preview=${parsed.data}&saved=1&line_error=${encodeURIComponent(lineError)}`:`/invoices?preview=${parsed.data}&saved=1&line=sent`);
 }
 
 const paymentSchema=z.object({invoice_id:z.string().uuid(),amount:z.coerce.number().positive(),method:z.enum(["cash","bank_transfer","promptpay","card","other"]),reference:z.string().max(100)});
@@ -233,14 +282,53 @@ export async function completeTask(formData:FormData) {
   redirect("/tasks?saved=1");
 }
 
-const propertySchema=z.object({name:z.string().trim().min(2).max(120),address:z.string().max(300),province:z.string().max(100),postal_code:z.string().max(12),phone:z.string().max(30)});
+const secureImageUrl=z.string().trim().url().refine(value=>value.startsWith("https://"),"Logo URL must use HTTPS").or(z.literal(""));
+const propertySchema=z.object({name:z.string().trim().min(2).max(120),address:z.string().max(300),province:z.string().max(100),postal_code:z.string().max(12),phone:z.string().max(30),logo_url:secureImageUrl});
 export async function createProperty(formData:FormData) {
   const parsed=propertySchema.safeParse(Object.fromEntries(formData));if(!parsed.success)redirect("/settings?error=กรุณาตรวจสอบชื่ออาคาร");
   const supabase=await createClient();if(!supabase)redirect("/settings?error=ยังไม่ได้ตั้งค่า Supabase");
   const {data:{user}}=await supabase.auth.getUser();if(!user)redirect("/login");
   const {data:membership}=await supabase.from("organization_members").select("organization_id,role").eq("user_id",user.id).limit(1).maybeSingle();if(!membership)redirect("/setup");
   if(!["owner","manager"].includes(membership.role))redirect("/settings?error=เฉพาะเจ้าของหรือผู้จัดการที่เพิ่มอาคารได้");
-  const {error}=await supabase.from("properties").insert({...parsed.data,organization_id:membership.organization_id});
+  const {error}=await supabase.from("properties").insert({...parsed.data,logo_url:parsed.data.logo_url||null,organization_id:membership.organization_id});
   if(error)redirect("/settings?error=เพิ่มอาคารไม่สำเร็จ");
   redirect("/settings?saved=1");
+}
+
+export async function updateProperty(formData:FormData) {
+  const propertyId=z.string().uuid().safeParse(formData.get("property_id"));
+  const parsed=propertySchema.safeParse(Object.fromEntries(formData));
+  if(!propertyId.success||!parsed.success)redirect("/settings?error=กรุณาตรวจสอบข้อมูลอาคาร");
+  const supabase=await createClient();if(!supabase)redirect("/settings?error=ยังไม่ได้ตั้งค่า Supabase");
+  const {data:{user}}=await supabase.auth.getUser();if(!user)redirect("/login");
+  const {data:membership}=await supabase.from("organization_members").select("organization_id,role").eq("user_id",user.id).limit(1).maybeSingle();
+  if(!membership||!(membership.role==="owner"||membership.role==="manager"))redirect("/settings?error=เฉพาะเจ้าของหรือผู้จัดการที่แก้ข้อมูลอาคารได้");
+  const {error}=await supabase.from("properties").update({...parsed.data,logo_url:parsed.data.logo_url||null}).eq("id",propertyId.data).eq("organization_id",membership.organization_id);
+  if(error)redirect("/settings?error=อัปเดตข้อมูลอาคารไม่สำเร็จ");
+  redirect("/settings?saved=1");
+}
+
+const brandSettingsSchema=z.object({document_display_name:z.string().trim().min(2).max(120),brand_logo_url:secureImageUrl,promptpay_id:z.string().trim().regex(/^(?:\d{10}|\d{13}|\d{15})?$/)});
+export async function updateBrandSettings(formData:FormData) {
+  const parsed=brandSettingsSchema.safeParse(Object.fromEntries(formData));
+  if(!parsed.success)redirect("/settings?error=กรุณาตรวจสอบชื่อกิจการ URL โลโก้ และ PromptPay ID");
+  const supabase=await createClient();if(!supabase)redirect("/settings?error=ยังไม่ได้ตั้งค่า Supabase");
+  const {data:{user}}=await supabase.auth.getUser();if(!user)redirect("/login");
+  const {data:membership}=await supabase.from("organization_members").select("organization_id,role").eq("user_id",user.id).limit(1).maybeSingle();
+  if(!membership||membership.role!=="owner")redirect("/settings?error=เฉพาะเจ้าของกิจการที่แก้การตั้งค่าได้");
+  const {error}=await supabase.from("organizations").update({document_display_name:parsed.data.document_display_name,brand_logo_url:parsed.data.brand_logo_url||null,promptpay_id:parsed.data.promptpay_id||null}).eq("id",membership.organization_id);
+  if(error)redirect("/settings?error=บันทึกการตั้งค่าไม่สำเร็จ กรุณารัน migration ล่าสุด");
+  redirect("/settings?saved=1");
+}
+
+export async function rotateTenantLineCode(formData:FormData) {
+  const tenantId=z.string().uuid().safeParse(formData.get("tenant_id"));
+  if(!tenantId.success)redirect("/tenants?error=ผู้เช่าไม่ถูกต้อง");
+  const supabase=await createClient();if(!supabase)redirect("/tenants?error=ยังไม่ได้ตั้งค่า Supabase");
+  const {data:{user}}=await supabase.auth.getUser();if(!user)redirect("/login");
+  const {data:membership}=await supabase.from("organization_members").select("organization_id,role").eq("user_id",user.id).limit(1).maybeSingle();
+  if(!membership||!(membership.role==="owner"||membership.role==="manager"))redirect("/tenants?error=เฉพาะเจ้าของหรือผู้จัดการที่จัดการ LINE ได้");
+  const {data,error}=await supabase.from("tenants").update({line_link_code:randomUUID(),line_link_expires_at:new Date(Date.now()+7*24*60*60*1000).toISOString()}).eq("id",tenantId.data).eq("organization_id",membership.organization_id).is("line_user_id",null).select("id").maybeSingle();
+  if(error||!data)redirect("/tenants?error=สร้างรหัส LINE ไม่สำเร็จ ผู้เช่าอาจเชื่อม LINE ไปแล้ว");
+  redirect("/tenants?saved=1");
 }

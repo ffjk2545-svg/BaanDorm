@@ -1,8 +1,8 @@
-# BaanDorm Product Scope
+# KumkongApartment Product Scope
 
 ## Purpose
 
-BaanDorm เป็นระบบบริหารอาคารเช่าในประเทศไทย ใช้ข้อมูลแบบ multi-tenant โดยกิจการเป็นขอบเขตความปลอดภัยหลัก สกุลเงิน THB และเวลา Asia/Bangkok
+KumkongApartment เป็นระบบบริหารจัดการหอพักสำหรับครอบครัวผู้ดูแลกิจการ ครอบคลุมการเช่า การจดมิเตอร์ การออกบิล การรับชำระ และการเงิน ใช้ข้อมูลแบบ multi-tenant โดยกิจการเป็นขอบเขตความปลอดภัยหลัก ภาษาหลักคือไทย สกุลเงิน THB และเวลา Asia/Bangkok ชื่อแบรนด์หลักคงที่ ส่วนชื่อกิจการ อาคาร ที่อยู่ โลโก้ และข้อมูลติดต่อที่แสดงบนเอกสารกำหนดได้จาก Settings
 
 ## Roles
 
@@ -14,7 +14,7 @@ Schema กำหนด `owner`, `manager`, `accountant`, `staff`, `tenant` ไ�
 |---|---|
 | Auth, business onboarding, room and tenant entry | Implemented |
 | Organization scoped schema and private evidence storage | Implemented in migration |
-| Meter reading with prior-reading validation | Implemented |
+| Monthly meter grid with prior/current readings and estimated charges | Implemented |
 | Live dashboard, rooms, tenant, meter read views | Implemented |
 | Lease start/end and deposit settlement | Implemented with transactional database functions |
 | Invoice generation from rent and configured meter rates | Implemented with an idempotency constraint and transaction |
@@ -23,11 +23,14 @@ Schema กำหนด `owner`, `manager`, `accountant`, `staff`, `tenant` ไ�
 | Rate configuration | Implemented with effective dates and a required provider-bill reference |
 | Maintenance tickets, announcements, parcels, task list | Basic create and close/collect/complete workflows implemented |
 | Assets, tenant portal, reporting, scheduled reminders | Schema/read views or not enabled; full workflows pending |
-| Tenant portal, LINE, OCR, PromptPay, notifications, PDF, imports, exports, backup | Not enabled; provider credentials/configuration and additional implementation required |
+| Tenant public invoice link, printable PDF and PromptPay QR | Implemented; PromptPay ID must be configured in Settings |
+| LINE invoice notifications | Implemented; requires LINE Official Account, Messaging API credentials, webhook setup, and tenant linking |
+| Full tenant portal, OCR, scheduled reminders, imports, exports, backup | Not enabled; additional implementation required |
 
 ## Business rules
 
 - A room may have only one active lease at a time.
+- Each monthly meter reading cannot be lower than its preceding reading; estimated utility charges use the currently effective configured rate.
 - Meter readings are unique per room, utility, and date; a new reading cannot be below its prior reading.
 - Invoices are unique for a lease and billing period.
 - Deposits are tracked separately from regular income.
