@@ -3,6 +3,7 @@ import { redirect } from "next/navigation";
 import { AppShell } from "@/components/app-shell";
 import { getWorkspace } from "@/lib/supabase/server";
 import { formatTHB } from "@/lib/finance";
+import { AnalyticsCharts, type ExpenseCategory, type MonthlyCashFlow, type MonthlyExpense, type MonthlyOccupancy } from "@/components/analytics-charts";
 
 export default async function Dashboard() {
   const { supabase, user, organizationId } = await getWorkspace();
@@ -13,14 +14,24 @@ export default async function Dashboard() {
   const today = new Intl.DateTimeFormat("en-CA", { timeZone: "Asia/Bangkok", year: "numeric", month: "2-digit", day: "2-digit" }).format(new Date());
   const billingMonth = today.slice(0, 7);
   const monthLabel = new Intl.DateTimeFormat("th-TH", { month: "long", year: "numeric", timeZone: "Asia/Bangkok" }).format(new Date(`${billingMonth}-01T12:00:00+07:00`));
-  const [roomsResult, leasesResult, invoicesResult, brand] = await Promise.all([
+  const [year, month] = billingMonth.split("-").map(Number);
+  const analysisMonths = Array.from({ length: 6 }, (_, index) => {
+    const date = new Date(Date.UTC(year, month - 1 - (5 - index), 1));
+    const key = `${date.getUTCFullYear()}-${String(date.getUTCMonth() + 1).padStart(2, "0")}`;
+    return { key, start: `${key}-01`, end: new Date(Date.UTC(date.getUTCFullYear(), date.getUTCMonth() + 1, 0)).toISOString().slice(0, 10), label: new Intl.DateTimeFormat("th-TH", { month: "short", timeZone: "Asia/Bangkok" }).format(new Date(`${key}-01T12:00:00+07:00`)) };
+  });
+  const analysisStart = `${analysisMonths[0].start}T00:00:00+07:00`;
+  const [roomsResult, leasesResult, invoicesResult, brand, paymentsHistory, expensesHistory] = await Promise.all([
     supabase.from("rooms").select("id,room_number,status,monthly_rent").eq("organization_id", organizationId).order("room_number"),
-    supabase.from("leases").select("id,room_id").eq("organization_id", organizationId).eq("status", "active"),
+    supabase.from("leases").select("id,room_id,rent_amount,start_date,end_date,status").eq("organization_id", organizationId).in("status", ["active", "ended"]),
     supabase.from("invoices").select("id,lease_id,invoice_number,total,status,due_date").eq("organization_id", organizationId).eq("period_start", `${billingMonth}-01`).order("due_date"),
     supabase.from("organizations").select("brand_logo_url").eq("id", organizationId).maybeSingle(),
+    supabase.from("payments").select("invoice_id,amount,received_at").eq("organization_id", organizationId).gte("received_at", analysisStart).lte("received_at", new Date().toISOString()),
+    supabase.from("expenses").select("amount,incurred_on,category").eq("organization_id", organizationId).gte("incurred_on", analysisMonths[0].start).lte("incurred_on", today),
   ]);
   const roomRows = roomsResult.data ?? [];
-  const leases = leasesResult.data ?? [];
+  const allLeases = leasesResult.data ?? [];
+  const leases = allLeases.filter(lease => lease.status === "active" && lease.start_date <= today && (!lease.end_date || lease.end_date >= today));
   const invoices = invoicesResult.data ?? [];
   const roomNumberById = new Map(roomRows.map(room => [room.id, room.room_number]));
   const roomIdByLeaseId = new Map(leases.map(lease => [lease.id, lease.room_id]));
@@ -32,15 +43,34 @@ export default async function Dashboard() {
   const invoicedLeaseIds = new Set(invoices.map(invoice => invoice.lease_id));
   const missingBills = leases.length - invoicedLeaseIds.size;
   const invoiceIds = invoices.map(invoice => invoice.id);
-  const paymentsResult = invoiceIds.length
-    ? await supabase.from("payments").select("invoice_id,amount").eq("organization_id", organizationId).in("invoice_id", invoiceIds)
-    : { data: [] as Array<{ invoice_id: string; amount: number | string }> };
+  const currentInvoiceIdSet = new Set(invoiceIds);
   const paidByInvoice = new Map<string, number>();
-  paymentsResult.data?.forEach(payment => paidByInvoice.set(payment.invoice_id, (paidByInvoice.get(payment.invoice_id) ?? 0) + Number(payment.amount)));
+  paymentsHistory.data?.forEach(payment => { if (currentInvoiceIdSet.has(payment.invoice_id)) paidByInvoice.set(payment.invoice_id, (paidByInvoice.get(payment.invoice_id) ?? 0) + Number(payment.amount)); });
   const outstanding = invoices.reduce((sum, invoice) => sum + Math.max(Number(invoice.total) - (paidByInvoice.get(invoice.id) ?? 0), 0), 0);
   const paidCount = invoices.filter(invoice => invoice.status === "paid").length;
   const pendingInvoices = invoices.filter(invoice => invoice.status !== "paid" && invoice.status !== "void").sort((a, b) => String(roomNumberById.get(roomIdByLeaseId.get(a.lease_id) ?? "") ?? "").localeCompare(String(roomNumberById.get(roomIdByLeaseId.get(b.lease_id) ?? "") ?? ""), "th", { numeric: true }));
   const progress = leases.length ? Math.min(100, Math.round(invoicedLeaseIds.size / leases.length * 100)) : 0;
+  const expenses = expensesHistory.data ?? [];
+  const payments = paymentsHistory.data ?? [];
+  const cashFlow: MonthlyCashFlow[] = analysisMonths.map(period => ({
+    key: period.key,
+    label: period.label,
+    income: payments.filter(payment => new Intl.DateTimeFormat("en-CA", { timeZone: "Asia/Bangkok", year: "numeric", month: "2-digit" }).format(new Date(payment.received_at)) === period.key).reduce((sum, payment) => sum + Number(payment.amount), 0),
+    expense: expenses.filter(expense => String(expense.incurred_on).slice(0, 7) === period.key).reduce((sum, expense) => sum + Number(expense.amount), 0),
+  }));
+  const occupancy: MonthlyOccupancy[] = analysisMonths.map(period => {
+    const snapshot = period.key === billingMonth ? today : period.end;
+    const leasedRoomIdsAtDate = new Set(allLeases.filter(lease => lease.start_date <= snapshot && (!lease.end_date || lease.end_date >= snapshot)).map(lease => lease.room_id));
+    return { key: period.key, label: period.label, occupied: leasedRoomIdsAtDate.size, total: roomRows.length };
+  });
+  const monthlyExpenses: MonthlyExpense[] = analysisMonths.map(period => ({ key: period.key, label: period.label, total: expenses.filter(expense => String(expense.incurred_on).slice(0, 7) === period.key).reduce((sum, expense) => sum + Number(expense.amount), 0) }));
+  const categoryTotals = new Map<string, number>();
+  expenses.forEach(expense => categoryTotals.set(expense.category || "อื่น ๆ", (categoryTotals.get(expense.category || "อื่น ๆ") ?? 0) + Number(expense.amount)));
+  const expenseCategories: ExpenseCategory[] = Array.from(categoryTotals, ([label, total]) => ({ label, total })).sort((a, b) => b.total - a.total).slice(0, 3);
+  const closedExpensePeriods = monthlyExpenses.slice(0, -1).slice(-3);
+  const forecastExpenses = closedExpensePeriods.length ? closedExpensePeriods.reduce((sum, period) => sum + period.total, 0) / closedExpensePeriods.length : 0;
+  const forecastIncome = leases.reduce((sum, lease) => sum + Number(lease.rent_amount), 0);
+  const forecast = { income: forecastIncome, expenses: forecastExpenses, net: forecastIncome - forecastExpenses };
 
   return <AppShell current="/" userEmail={user.email ?? ""} brandLogoUrl={brand.data?.brand_logo_url}>
     <section className="dashboard-hero">
@@ -80,6 +110,8 @@ export default async function Dashboard() {
         return <Link className="pending-item" href={`/invoices?billing_month=${billingMonth}&preview=${invoice.id}`} key={invoice.id}><span className="pending-room">ห้อง {roomNumber}</span><span className="pending-invoice">{invoice.invoice_number}<small>ครบกำหนด {invoice.due_date}</small></span><strong>{formatTHB(Math.max(Number(invoice.total) - (paidByInvoice.get(invoice.id) ?? 0), 0))}</strong><span className={`badge ${invoice.status === "overdue" ? "warn" : ""}`}>{invoice.status === "overdue" ? "เกินกำหนด" : invoice.status === "partial" ? "ชำระบางส่วน" : "รอชำระ"}</span></Link>;
       })}{pendingInvoices.length > 6 && <Link className="pending-more" href={`/invoices?billing_month=${billingMonth}`}>ดูบิลค้างทั้งหมด {pendingInvoices.length} รายการ →</Link>}</div>}
     </section>
+
+    <AnalyticsCharts cashFlow={cashFlow} occupancy={occupancy} expenses={monthlyExpenses} categories={expenseCategories} forecast={forecast}/>
 
     <section className="dashboard-shortcuts"><Link href="/meters"><span className="shortcut-icon">↗</span><span><strong>จดมิเตอร์น้ำและไฟ</strong><small>น้ำ 12 บาท/หน่วย · ไฟ 8 บาท/หน่วย</small></span><b>→</b></Link><Link href="/rooms"><span className="shortcut-icon">⌂</span><span><strong>สถานะห้องและผู้เช่า</strong><small>ดูห้องว่าง ย้ายเข้า หรือบันทึกย้ายออก</small></span><b>→</b></Link></section>
   </AppShell>;
