@@ -120,14 +120,21 @@ export async function createResidentAndLease(formData: FormData) {
 const meterSchema=z.object({room_id:z.string().uuid(),utility:z.enum(["water","electricity"]),reading_value:z.coerce.number().nonnegative(),read_at:z.string().date(),notes:z.string().max(500)});
 export async function recordMeter(formData:FormData) {
   const parsed=meterSchema.safeParse(Object.fromEntries(formData)); if(!parsed.success) redirect("/meters?error=กรุณาตรวจสอบข้อมูลมิเตอร์");
+  const returnPath=`/meters?read_date=${encodeURIComponent(parsed.data.read_at)}`;
+  const today=new Intl.DateTimeFormat("en-CA",{timeZone:"Asia/Bangkok",year:"numeric",month:"2-digit",day:"2-digit"}).format(new Date());
+  if(parsed.data.read_at>today)redirect(`${returnPath}&error=เลือกวันที่วันนี้หรือย้อนหลังเท่านั้น`);
   const supabase=await createClient(); if(!supabase) redirect("/meters?error=ยังไม่ได้ตั้งค่า Supabase");
   const {data:{user}}=await supabase.auth.getUser(); if(!user) redirect("/login");
   const {data:membership}=await supabase.from("organization_members").select("organization_id").eq("user_id",user.id).limit(1).maybeSingle(); if(!membership) redirect("/setup");
-  const {data:previous}=await supabase.from("meter_readings").select("reading_value").eq("organization_id",membership.organization_id).eq("room_id",parsed.data.room_id).eq("utility",parsed.data.utility).lt("read_at",parsed.data.read_at).order("read_at",{ascending:false}).limit(1).maybeSingle();
-  if(previous && parsed.data.reading_value<Number(previous.reading_value)) redirect("/meters?error=เลขมิเตอร์ต้องไม่น้อยกว่าครั้งก่อน");
+  const [previous,next]=await Promise.all([
+    supabase.from("meter_readings").select("reading_value").eq("organization_id",membership.organization_id).eq("room_id",parsed.data.room_id).eq("utility",parsed.data.utility).lt("read_at",parsed.data.read_at).order("read_at",{ascending:false}).limit(1).maybeSingle(),
+    supabase.from("meter_readings").select("reading_value").eq("organization_id",membership.organization_id).eq("room_id",parsed.data.room_id).eq("utility",parsed.data.utility).gt("read_at",parsed.data.read_at).order("read_at").limit(1).maybeSingle(),
+  ]);
+  if(previous.data && parsed.data.reading_value<Number(previous.data.reading_value)) redirect(`${returnPath}&error=เลขมิเตอร์ต้องไม่น้อยกว่าครั้งก่อน`);
+  if(next.data && parsed.data.reading_value>Number(next.data.reading_value)) redirect(`${returnPath}&error=เลขย้อนหลังต้องไม่มากกว่าค่าที่บันทึกในวันถัดไป`);
   const {error}=await supabase.from("meter_readings").upsert({...parsed.data,organization_id:membership.organization_id,captured_by:user.id},{onConflict:"room_id,utility,read_at"});
-  if(error) redirect(`/meters?error=${encodeURIComponent("บันทึกไม่สำเร็จ ตรวจสอบว่าห้องและเลขมิเตอร์ถูกต้อง")}`);
-  redirect("/meters?saved=1");
+  if(error) redirect(`${returnPath}&error=${encodeURIComponent("บันทึกไม่สำเร็จ ตรวจสอบวันและเลขมิเตอร์")}`);
+  redirect(`${returnPath}&saved=1`);
 }
 
 const leaseSchema=z.object({room_id:z.string().uuid(),tenant_id:z.string().uuid(),start_date:z.string().date(),end_date:z.string().date().or(z.literal("")),rent_amount:z.coerce.number().nonnegative(),deposit_amount:z.coerce.number().nonnegative(),billing_day:z.coerce.number().int().min(1).max(28)});
